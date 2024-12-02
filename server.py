@@ -2,7 +2,7 @@ import socket
 import threading
 import signal
 import sys
-import bcrypt
+import hashlib
 import base64
 import os
 import uuid
@@ -266,20 +266,23 @@ def handle_client(client_socket, id):
         end_connection(id)
 
 
-# User Authentication
 def authenticate_user(username, password):
     try:
         with open("user_credentials.txt", "r") as file:
             for line in file:
                 if not line.strip():
                     continue
-                user, hashed = line.strip().split()
-                if user == username and bcrypt.checkpw(password.encode(), hashed.encode()):
+                user, stored_hash = line.strip().split()
+                if user == username and verify_sha256(password, stored_hash):
                     return True
     except FileNotFoundError:
         print("Error: User credentials file not found.")
     return False
 
+def verify_sha256(password, stored_hash):
+    """Verify if the SHA-256 hash of the password matches the stored hash."""
+    hashed_password = hashlib.sha256(password.encode()).hexdigest()
+    return hashed_password == stored_hash
 
 def signup_user(username, password):
     try:
@@ -289,7 +292,7 @@ def signup_user(username, password):
                     print("Error: Username already exists.")
                     return False
 
-        hashed_password = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+        hashed_password = hashlib.sha256(password.encode()).hexdigest()  # SHA-256 hash
         with open("user_credentials.txt", "a") as file:
             file.write(f"{username} {hashed_password}\n")
             return True

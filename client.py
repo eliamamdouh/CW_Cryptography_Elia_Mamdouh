@@ -3,6 +3,7 @@ import threading
 import signal
 import sys
 import os
+import hashlib
 
 MAX_LEN = 200
 colors = ["\033[31m", "\033[32m", "\033[33m", "\033[34m", "\033[35m", "\033[36m"]
@@ -56,7 +57,9 @@ def signup_user(client_socket):
     username = input("Enter a username: ")
     password = input("Enter a password: ")
     
-    credentials = f"{username} {password}"
+    hashed_password = hashlib.sha256(password.encode()).hexdigest()  # SHA-256 hash
+    
+    credentials = f"{username} {hashed_password}"
     try:
         client_socket.send(credentials.encode())
         response = client_socket.recv(2).decode()
@@ -72,7 +75,9 @@ def login_user(client_socket):
     username = input("Enter your username: ")
     password = input("Enter your password: ")
     
-    credentials = f"{username} {password}"
+    hashed_password = hashlib.sha256(password.encode()).hexdigest()  # SHA-256 hash
+    
+    credentials = f"{username} {hashed_password}"
     try:
         client_socket.send(credentials.encode())
         response = client_socket.recv(2).decode()
