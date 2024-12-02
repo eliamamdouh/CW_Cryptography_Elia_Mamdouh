@@ -45,6 +45,7 @@ class Terminal:
         self.id = id
         self.name = name
         self.socket = socket
+        self.public_key = None  # Will be set after receiving the client's public key
 
 # Utility Functions
 def color(code):
@@ -66,10 +67,10 @@ def broadcast_message(message, sender_id):
         for client in clients:
             if client.id != sender_id:
                 try:
-                    # Send length-prefixed message
-                    send_length_prefixed_message(client.socket, formatted_message.encode())
+                    # Encrypt and send the message to the client
+                    send_encrypted_message_to_client(client.socket, client.public_key, formatted_message.encode())
                 except Exception as e:
-                    shared_print(f"Error sending message to client {client.id}: {e}")
+                    shared_print(f"Error sending message to client {client.name}: {e}")
                     disconnected_clients.append(client)
 
     # Remove disconnected clients
@@ -80,10 +81,25 @@ def broadcast_message(message, sender_id):
     # Save the formatted message to the conversation log
     conversation.append(formatted_message)
 
-def send_length_prefixed_message(sock, data):
-    # Send the length of the message first (4 bytes, big-endian)
-    msg_length = struct.pack('>I', len(data))
-    sock.sendall(msg_length + data)
+def send_encrypted_message_to_client(client_socket, client_public_key, message):
+    try:
+        # Encrypt the message using the client's public key
+        encrypted = client_public_key.encrypt(
+            message,
+            asym_padding.OAEP(
+                mgf=asym_padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None
+            )
+        )
+        # Encode the encrypted message in Base64
+        encrypted_base64 = base64.b64encode(encrypted)
+        # Send the length of the message first
+        msg_length = struct.pack('>I', len(encrypted_base64))
+        client_socket.sendall(msg_length + encrypted_base64)
+    except Exception as e:
+        shared_print(f"Error sending encrypted message to client: {e}")
+        raise
 
 def end_connection(id):
     with clients_lock:
@@ -249,6 +265,17 @@ def recvall(sock, n):
         data += packet
     return data
 
+def receive_client_public_key(client_socket):
+    try:
+        # Receive the client's public key
+        pem_public_key = client_socket.recv(2048)
+        client_public_key = serialization.load_pem_public_key(pem_public_key)
+        return client_public_key
+    except Exception as e:
+        shared_print(f"Failed to receive client public key: {e}")
+        return None
+
+# Client Handler
 def handle_client(client_socket, id, terminal):
     rsa_successful = True  # Initialize the RSA success flag to True
     try:
@@ -259,18 +286,44 @@ def handle_client(client_socket, id, terminal):
         )
         client_socket.send(pem_public_key)
 
+        # Receive the client's public key
+        client_public_key = receive_client_public_key(client_socket)
+        if client_public_key is None:
+            shared_print(f"Failed to receive client public key from client {id}.")
+            client_socket.close()
+            return
+
+        # Store the client's public key in the terminal object
+        terminal.public_key = client_public_key
+
         # Receive the action indicator
-        action = client_socket.recv(6).decode().strip()
+        raw_msglen = recvall(client_socket, 4)
+        if not raw_msglen:
+            shared_print(f"Failed to receive action indicator from client {id}.")
+            client_socket.close()
+            return
+        msglen = struct.unpack('>I', raw_msglen)[0]
+        encrypted_action = recvall(client_socket, msglen)
+        action = decrypt_message(encrypted_action)
         if action not in ['LOGIN', 'SIGNUP']:
             shared_print(f"Invalid action from client {id}: {action}")
-            client_socket.send(b'0')
+            # Encrypt and send failure response
+            send_encrypted_message_to_client(client_socket, terminal.public_key, b'0')
             return
 
         # Receive credentials from the client
-        credentials = client_socket.recv(MAX_LEN).decode().strip()
+        raw_msglen = recvall(client_socket, 4)
+        if not raw_msglen:
+            shared_print(f"Failed to receive credentials from client {id}.")
+            client_socket.close()
+            return
+        msglen = struct.unpack('>I', raw_msglen)[0]
+        encrypted_credentials = recvall(client_socket, msglen)
+        credentials = decrypt_message(encrypted_credentials)
         if not credentials:
             shared_print(f"Received empty credentials from client {id}.")
-            client_socket.send(b'0')
+            # Encrypt and send failure response
+            send_encrypted_message_to_client(client_socket, terminal.public_key, b'0')
             return
 
         # Parse credentials
@@ -278,7 +331,8 @@ def handle_client(client_socket, id, terminal):
             name, password = credentials.split()
         except ValueError:
             shared_print(f"Invalid credentials format from client {id}.")
-            client_socket.send(b'0')
+            # Encrypt and send failure response
+            send_encrypted_message_to_client(client_socket, terminal.public_key, b'0')
             return
 
         shared_print(f"Received name: {name}")
@@ -288,17 +342,21 @@ def handle_client(client_socket, id, terminal):
             authenticated = authenticate_user(name, password)
             if not authenticated:
                 shared_print(f"Authentication failed for {name}.")
-                client_socket.send(b'0')
+                # Encrypt and send failure response
+                send_encrypted_message_to_client(client_socket, terminal.public_key, b'0')
                 return
             else:
-                client_socket.send(b'1')
+                # Encrypt and send success response
+                send_encrypted_message_to_client(client_socket, terminal.public_key, b'1')
         elif action == 'SIGNUP':
             # Attempt to sign up the user
             if not signup_user(name, password):
-                client_socket.send(b'0')
+                # Encrypt and send failure response
+                send_encrypted_message_to_client(client_socket, terminal.public_key, b'0')
                 return
             else:
-                client_socket.send(b'1')
+                # Encrypt and send success response
+                send_encrypted_message_to_client(client_socket, terminal.public_key, b'1')
 
         # Update the client's name in the Terminal object
         terminal.name = name  # Update the name to the authenticated username
@@ -334,9 +392,10 @@ def handle_client(client_socket, id, terminal):
                     user_list = ', '.join(client.name for client in clients if client.name != "Anonymous")
                 user_list = "People entered the chatroom: " + user_list
                 try:
-                    send_length_prefixed_message(client_socket, user_list.encode())
+                    # Encrypt and send the user list to the client
+                    send_encrypted_message_to_client(client_socket, terminal.public_key, user_list.encode())
                 except Exception as e:
-                    shared_print(f"Error sending user list to client {id}: {e}")
+                    shared_print(f"Error sending user list to client {name}: {e}")
                 continue
 
             broadcast_message(f"{name}: {message}", id)
@@ -382,13 +441,14 @@ def signup_user(username, password):
                         continue
                     existing_user = line.strip().split()[0]
                     if username == existing_user:
-                        shared_print("Error: Username already exists.")
+                        shared_print(f"Signup failed for {username}: Username already exists.")
                         return False
 
         # Hash the password and store credentials
         hashed_password = hashlib.sha256(password.encode()).hexdigest()  # SHA-256 hash
         with open("user_credentials.txt", "a") as file:
             file.write(f"{username} {hashed_password}\n")
+            shared_print(f"User {username} signed up successfully.")
             return True
 
     except IOError as e:

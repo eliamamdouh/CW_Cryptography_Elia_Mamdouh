@@ -7,7 +7,7 @@ import hashlib
 import base64
 import struct
 from cryptography.hazmat.primitives import serialization, hashes
-from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 MAX_LEN = 200
 colors = ["\033[31m", "\033[32m", "\033[33m", "\033[34m", "\033[35m", "\033[36m"]
@@ -16,20 +16,21 @@ def_col = "\033[0m"
 client_socket = None
 exit_flag = False
 server_public_key = None  # Store the server's public key
+client_private_key = None  # Store the client's private key
 
 def catch_ctrl_c(_signal, _frame):
     global exit_flag
     exit_flag = True
     str_msg = "#exit"
     try:
-        encrypted_msg = encrypt_message(str_msg)
+        encrypted_msg = encrypt_message_to_server(str_msg)
         send_encrypted_message(encrypted_msg)
     except Exception as e:
         print(f"Error while sending exit message: {e}")
     client_socket.close()
     os._exit(0)
 
-def encrypt_message(message):
+def encrypt_message_to_server(message):
     global server_public_key
     if not server_public_key:
         print("Server public key not available. Cannot encrypt message.")
@@ -58,7 +59,7 @@ def send_message(client_socket):
         try:
             msg = input(colors[1] + "You: " + def_col)
             if msg:  # Only send if the message is not empty
-                encrypted_msg = encrypt_message(msg)
+                encrypted_msg = encrypt_message_to_server(msg)
                 send_encrypted_message(encrypted_msg)
             if msg == "#exit":
                 exit_flag = True
@@ -78,8 +79,12 @@ def recv_message(client_socket):
             if not raw_msglen:
                 break
             msglen = struct.unpack('>I', raw_msglen)[0]
-            # Receive the message data
-            msg = recvall(client_socket, msglen).decode()
+            # Receive the encrypted message data
+            encrypted_message_base64 = recvall(client_socket, msglen)
+            if not encrypted_message_base64:
+                continue
+            # Decrypt the message using client's private key
+            msg = decrypt_message_from_server(encrypted_message_base64)
             if not msg:
                 continue
             print("\033[2K\r" + msg)
@@ -106,15 +111,15 @@ def signup_user(client_socket):
     credentials = f"{username} {hashed_password}"
 
     try:
-        # Send the action indicator
-        client_socket.send(b"SIGNUP")
-        # Send the credentials
-        client_socket.send(credentials.encode())
-        response = client_socket.recv(2).decode()
+        # Encrypt the action indicator and credentials
+        action_encrypted = encrypt_message_to_server('SIGNUP')
+        credentials_encrypted = encrypt_message_to_server(credentials)
+        # Send the encrypted action indicator and credentials
+        send_encrypted_message(action_encrypted)
+        send_encrypted_message(credentials_encrypted)
+        # Receive and decrypt the response
+        response = receive_encrypted_response()
         return response == '1'
-    except ConnectionResetError:
-        print("Connection was reset by the server during signup. Please try again.")
-        return False
     except Exception as e:
         print(f"An error occurred during signup: {e}")
         return False
@@ -127,22 +132,40 @@ def login_user(client_socket):
     credentials = f"{username} {hashed_password}"
 
     try:
-        # Send the action indicator
-        client_socket.send(b"LOGIN")
-        # Send the credentials
-        client_socket.send(credentials.encode())
-        response = client_socket.recv(2).decode()
+        # Encrypt the action indicator and credentials
+        action_encrypted = encrypt_message_to_server('LOGIN')
+        credentials_encrypted = encrypt_message_to_server(credentials)
+        # Send the encrypted action indicator and credentials
+        send_encrypted_message(action_encrypted)
+        send_encrypted_message(credentials_encrypted)
+        # Receive and decrypt the response
+        response = receive_encrypted_response()
         return response == '1'
-    except ConnectionResetError:
-        print("Connection was reset by the server during login. Please try again.")
-        return False
     except Exception as e:
         print(f"An error occurred during login: {e}")
         return False
 
+def receive_encrypted_response():
+    try:
+        # Receive the length of the message first
+        raw_msglen = recvall(client_socket, 4)
+        if not raw_msglen:
+            return None
+        msglen = struct.unpack('>I', raw_msglen)[0]
+        # Receive the encrypted response
+        encrypted_response = recvall(client_socket, msglen)
+        if not encrypted_response:
+            return None
+        # Decrypt the response using client's private key
+        response = decrypt_message_from_server(encrypted_response)
+        return response
+    except Exception as e:
+        print(f"Error receiving encrypted response: {e}")
+        return None
+
 def display_users(client_socket):
-    # Send the request to get the user list
-    encrypted_msg = encrypt_message('GET_USERS')
+    # Encrypt and send the request to get the user list
+    encrypted_msg = encrypt_message_to_server('GET_USERS')
     send_encrypted_message(encrypted_msg)
     # Receive the length of the message first
     raw_msglen = recvall(client_socket, 4)
@@ -150,9 +173,17 @@ def display_users(client_socket):
         print("Failed to receive user list.")
         return
     msglen = struct.unpack('>I', raw_msglen)[0]
-    # Receive the message data
-    user_list = recvall(client_socket, msglen).decode()
-    print(colors[4] + "\nConnected Users: " + def_col + user_list)
+    # Receive the encrypted message data
+    encrypted_user_list = recvall(client_socket, msglen)
+    if not encrypted_user_list:
+        print("Failed to receive user list.")
+        return
+    # Decrypt the user list
+    user_list = decrypt_message_from_server(encrypted_user_list)
+    if user_list:
+        print(colors[4] + "\nConnected Users: " + def_col + user_list)
+    else:
+        print("Failed to decrypt user list.")
 
 def receive_server_public_key():
     global server_public_key
@@ -164,8 +195,37 @@ def receive_server_public_key():
         print(f"Failed to receive server public key: {e}")
         sys.exit()
 
+def send_client_public_key(client_public_key):
+    try:
+        pem_public_key = client_public_key.public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+        client_socket.sendall(pem_public_key)
+        print("Sent client public key to the server.")
+    except Exception as e:
+        print(f"Failed to send client public key: {e}")
+        sys.exit()
+
+def decrypt_message_from_server(encrypted_message_base64):
+    global client_private_key
+    try:
+        encrypted_message = base64.b64decode(encrypted_message_base64)
+        decrypted = client_private_key.decrypt(
+            encrypted_message,
+            padding.OAEP(
+                mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None
+            )
+        )
+        return decrypted.decode()
+    except Exception as e:
+        print(f"Error decrypting message from server: {e}")
+        return None
+
 def main():
-    global client_socket
+    global client_socket, client_private_key
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
     server_address = ('127.0.0.1', 10000)
@@ -188,6 +248,16 @@ def main():
     # Receive the server's public key
     receive_server_public_key()
 
+    # Generate client's RSA key pair
+    client_private_key = rsa.generate_private_key(
+        public_exponent=65537,
+        key_size=2048
+    )
+    client_public_key = client_private_key.public_key()
+
+    # Send the client's public key to the server
+    send_client_public_key(client_public_key)
+
     choice = int(input("Choose an option:\n1. Sign up\n2. Log in\nYour choice: "))
 
     login_success = False
@@ -201,7 +271,7 @@ def main():
         sys.exit()
 
     if not login_success:
-        print("Log-in failed. Exiting...")
+        print("Operation failed. Please check your credentials or try again.")
         client_socket.close()
         sys.exit()
 
