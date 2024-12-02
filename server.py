@@ -249,7 +249,6 @@ def recvall(sock, n):
         data += packet
     return data
 
-# Client Handler
 def handle_client(client_socket, id, terminal):
     rsa_successful = True  # Initialize the RSA success flag to True
     try:
@@ -259,6 +258,13 @@ def handle_client(client_socket, id, terminal):
             format=serialization.PublicFormat.SubjectPublicKeyInfo
         )
         client_socket.send(pem_public_key)
+
+        # Receive the action indicator
+        action = client_socket.recv(6).decode().strip()
+        if action not in ['LOGIN', 'SIGNUP']:
+            shared_print(f"Invalid action from client {id}: {action}")
+            client_socket.send(b'0')
+            return
 
         # Receive credentials from the client
         credentials = client_socket.recv(MAX_LEN).decode().strip()
@@ -277,16 +283,22 @@ def handle_client(client_socket, id, terminal):
 
         shared_print(f"Received name: {name}")
 
-        # Authenticate user
-        authenticated = authenticate_user(name, password)
-        if not authenticated:
+        if action == 'LOGIN':
+            # Authenticate user
+            authenticated = authenticate_user(name, password)
+            if not authenticated:
+                shared_print(f"Authentication failed for {name}.")
+                client_socket.send(b'0')
+                return
+            else:
+                client_socket.send(b'1')
+        elif action == 'SIGNUP':
             # Attempt to sign up the user
             if not signup_user(name, password):
                 client_socket.send(b'0')
                 return
-            client_socket.send(b'1')
-        else:
-            client_socket.send(b'1')
+            else:
+                client_socket.send(b'1')
 
         # Update the client's name in the Terminal object
         terminal.name = name  # Update the name to the authenticated username

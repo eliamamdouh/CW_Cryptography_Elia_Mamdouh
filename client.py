@@ -106,6 +106,9 @@ def signup_user(client_socket):
     credentials = f"{username} {hashed_password}"
 
     try:
+        # Send the action indicator
+        client_socket.send(b"SIGNUP")
+        # Send the credentials
         client_socket.send(credentials.encode())
         response = client_socket.recv(2).decode()
         return response == '1'
@@ -124,6 +127,9 @@ def login_user(client_socket):
     credentials = f"{username} {hashed_password}"
 
     try:
+        # Send the action indicator
+        client_socket.send(b"LOGIN")
+        # Send the credentials
         client_socket.send(credentials.encode())
         response = client_socket.recv(2).decode()
         return response == '1'
