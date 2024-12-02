@@ -91,7 +91,7 @@ def end_connection(id):
             if client.id == id:
                 client.socket.close()
                 clients.remove(client)
-                shared_print(f"Connection closed for client {id}.")
+                shared_print(f"Connection closed for {client.name}.")
                 break
 
 # AES Encryption/Decryption Utilities
@@ -250,7 +250,8 @@ def recvall(sock, n):
     return data
 
 # Client Handler
-def handle_client(client_socket, id):
+def handle_client(client_socket, id, terminal):
+    rsa_successful = True  # Initialize the RSA success flag to True
     try:
         # Send the server's public key to the client
         pem_public_key = public_key.public_bytes(
@@ -264,7 +265,6 @@ def handle_client(client_socket, id):
         if not credentials:
             shared_print(f"Received empty credentials from client {id}.")
             client_socket.send(b'0')
-            end_connection(id)
             return
 
         # Parse credentials
@@ -273,7 +273,6 @@ def handle_client(client_socket, id):
         except ValueError:
             shared_print(f"Invalid credentials format from client {id}.")
             client_socket.send(b'0')
-            end_connection(id)
             return
 
         shared_print(f"Received name: {name}")
@@ -284,11 +283,13 @@ def handle_client(client_socket, id):
             # Attempt to sign up the user
             if not signup_user(name, password):
                 client_socket.send(b'0')
-                end_connection(id)
                 return
             client_socket.send(b'1')
         else:
             client_socket.send(b'1')
+
+        # Update the client's name in the Terminal object
+        terminal.name = name  # Update the name to the authenticated username
 
         # Announce user join
         broadcast_message(f"{name} has joined", id)
@@ -308,16 +309,17 @@ def handle_client(client_socket, id):
             # Decrypt the message
             message = decrypt_message(encrypted_message_base64)
             if not message:
+                rsa_successful = False  # Set the flag to False if decryption fails
                 continue  # Skip if decryption failed
 
             if message == "#exit":
                 broadcast_message(f"{name} has left", id)
                 shared_print(color(id) + f"{name} has left" + def_col)
-                end_connection(id)
-                return
+                break  # Exit the loop to close the connection
 
             if message == 'GET_USERS':
-                user_list = ', '.join(client.name for client in clients if client.name != "Anonymous")
+                with clients_lock:
+                    user_list = ', '.join(client.name for client in clients if client.name != "Anonymous")
                 user_list = "People entered the chatroom: " + user_list
                 try:
                     send_length_prefixed_message(client_socket, user_list.encode())
@@ -329,11 +331,15 @@ def handle_client(client_socket, id):
             shared_print(color(id) + f"{name}: " + def_col + message)
 
     except ConnectionResetError:
-        shared_print(f"Connection was reset by client {id}.")
-        end_connection(id)
+        shared_print(f"Connection was reset by client {name}.")
     except Exception as e:
-        shared_print(f"An error occurred while handling client {id}: {e}")
+        shared_print(f"An error occurred while handling client {name}: {e}")
+    finally:
+        # Ensure the connection is closed
         end_connection(id)
+        # Check the RSA success flag and print the message
+        if rsa_successful:
+            shared_print(f"This conversation with {name} was successfully encrypted using RSA Encryption.")
 
 # Authentication Functions
 def authenticate_user(username, password):
@@ -403,7 +409,8 @@ def main():
             with clients_lock:
                 clients.append(terminal)
 
-            threading.Thread(target=handle_client, args=(client_socket, id), daemon=True).start()
+            # Pass the terminal object to handle_client
+            threading.Thread(target=handle_client, args=(client_socket, id, terminal), daemon=True).start()
         except Exception as e:
             shared_print(f"Error accepting connection: {e}")
             break

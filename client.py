@@ -136,7 +136,8 @@ def login_user(client_socket):
 
 def display_users(client_socket):
     # Send the request to get the user list
-    send_encrypted_message(encrypt_message('GET_USERS'))
+    encrypted_msg = encrypt_message('GET_USERS')
+    send_encrypted_message(encrypted_msg)
     # Receive the length of the message first
     raw_msglen = recvall(client_socket, 4)
     if not raw_msglen:

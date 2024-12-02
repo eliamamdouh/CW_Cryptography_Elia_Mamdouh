@@ -1,0 +1,8 @@
+[2024-12-03 00:05:41] ramez has joined
+[2024-12-03 00:05:43] ramez: hello
+[2024-12-03 00:05:45] ramez: welceom
+[2024-12-03 00:05:54] elia has joined
+[2024-12-03 00:05:56] elia: hello
+[2024-12-03 00:05:57] elia: welceom
+[2024-12-03 00:05:59] elia: bye
+[2024-12-03 00:06:15] ramez has left
