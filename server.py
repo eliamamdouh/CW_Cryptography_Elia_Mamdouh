@@ -6,10 +6,13 @@ import hashlib
 import base64
 import os
 import uuid
+import struct
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.primitives import padding, hashes
+from cryptography.hazmat.primitives import padding as sym_padding, hashes, serialization
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.backends import default_backend
+from datetime import datetime
+from cryptography.hazmat.primitives.asymmetric import rsa, padding as asym_padding
 
 # Server Configuration
 MAX_LEN = 200
@@ -28,6 +31,13 @@ clients_lock = threading.Lock()
 colors = ["\033[31m", "\033[32m", "\033[33m", "\033[34m", "\033[35m", "\033[36m"]
 def_col = "\033[0m"
 
+# Generate RSA key pair for the server
+private_key = rsa.generate_private_key(
+    public_exponent=65537,
+    key_size=2048,
+    backend=default_backend()
+)
+public_key = private_key.public_key()
 
 class Terminal:
     """Represents a connected client."""
@@ -36,26 +46,28 @@ class Terminal:
         self.name = name
         self.socket = socket
 
-
 # Utility Functions
 def color(code):
     return colors[code % NUM_COLORS]
-
 
 def shared_print(message, end_line=True):
     with cout_lock:
         print(message, end="\n" if end_line else "", flush=True)
 
-
 def broadcast_message(message, sender_id):
     global conversation
     disconnected_clients = []
+
+    # Add timestamp to the message
+    timestamp = datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
+    formatted_message = f"{timestamp} {message}"
 
     with clients_lock:
         for client in clients:
             if client.id != sender_id:
                 try:
-                    client.socket.send(message.encode())
+                    # Send length-prefixed message
+                    send_length_prefixed_message(client.socket, formatted_message.encode())
                 except Exception as e:
                     shared_print(f"Error sending message to client {client.id}: {e}")
                     disconnected_clients.append(client)
@@ -65,9 +77,13 @@ def broadcast_message(message, sender_id):
         for client in disconnected_clients:
             clients.remove(client)
 
-    # Save the message to the conversation log
-    conversation.append(message)
+    # Save the formatted message to the conversation log
+    conversation.append(formatted_message)
 
+def send_length_prefixed_message(sock, data):
+    # Send the length of the message first (4 bytes, big-endian)
+    msg_length = struct.pack('>I', len(data))
+    sock.sendall(msg_length + data)
 
 def end_connection(id):
     with clients_lock:
@@ -77,7 +93,6 @@ def end_connection(id):
                 clients.remove(client)
                 shared_print(f"Connection closed for client {id}.")
                 break
-
 
 # AES Encryption/Decryption Utilities
 def derive_aes_key(password, salt, length=32):
@@ -91,14 +106,12 @@ def derive_aes_key(password, salt, length=32):
     )
     return kdf.derive(password.encode())
 
-
 def pad_data(data):
-    padder = padding.PKCS7(algorithms.AES.block_size).padder()
+    padder = sym_padding.PKCS7(algorithms.AES.block_size).padder()
     return padder.update(data) + padder.finalize()
 
-
 def unpad_data(data):
-    unpadder = padding.PKCS7(algorithms.AES.block_size).unpadder()
+    unpadder = sym_padding.PKCS7(algorithms.AES.block_size).unpadder()
     return unpadder.update(data) + unpadder.finalize()
 
 def encrypt_conversation(conversation, filename):
@@ -127,7 +140,6 @@ def encrypt_conversation(conversation, filename):
     except Exception as e:
         shared_print(f"Error encrypting conversation: {e}")
         return False
-
 
 def decrypt_conversation(filename, output_filename):
     try:
@@ -158,14 +170,12 @@ def decrypt_conversation(filename, output_filename):
         shared_print(f"Error decrypting conversation: {e}")
         return False
 
-
 def validate_key_and_iv(key, iv_length=16):
     """Validate AES key and IV length."""
     if len(key) not in [16, 24, 32]:
         raise ValueError(f"Invalid key size: {len(key)} bytes. Must be 16, 24, or 32 bytes.")
     if len(key[:iv_length]) != iv_length:
         raise ValueError(f"Invalid IV size: {len(key[:iv_length])} bytes. Must be {iv_length} bytes.")
-
 
 def save_conversation():
     global conversation, session_id
@@ -190,7 +200,7 @@ def save_conversation():
         shared_print(f"Error saving decrypted conversation: {e}")
 
 # Signal Handling with user prompt
-def handle_ctrl_c(signal, frame):
+def handle_ctrl_c(signal_received, frame):
     shared_print("\nCTRL+C pressed. Do you want to end the server?")
     shared_print("Type 'yes' to end the server or 'no' to return to the chat.")
 
@@ -209,12 +219,47 @@ def handle_ctrl_c(signal, frame):
         sys.exit(0)  # Exit the program after shutting down
     else:
         shared_print("Returning to the chat...")
-        # Return to the chat loop (you can continue with the server's main while loop)
         return
+
+def decrypt_message(encrypted_message_base64):
+    try:
+        # Decode the Base64-encoded data
+        encrypted_message = base64.b64decode(encrypted_message_base64)
+
+        decrypted = private_key.decrypt(
+            encrypted_message,
+            asym_padding.OAEP(
+                mgf=asym_padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None
+            )
+        )
+        return decrypted.decode()
+    except Exception as e:
+        shared_print(f"Error decrypting message: {e}")
+        return None
+
+def recvall(sock, n):
+    """Helper function to receive n bytes or return None if EOF is hit."""
+    data = b''
+    while len(data) < n:
+        packet = sock.recv(n - len(data))
+        if not packet:
+            return None
+        data += packet
+    return data
 
 # Client Handler
 def handle_client(client_socket, id):
     try:
+        # Send the server's public key to the client
+        pem_public_key = public_key.public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+        client_socket.send(pem_public_key)
+
+        # Receive credentials from the client
         credentials = client_socket.recv(MAX_LEN).decode().strip()
         if not credentials:
             shared_print(f"Received empty credentials from client {id}.")
@@ -222,11 +267,21 @@ def handle_client(client_socket, id):
             end_connection(id)
             return
 
-        name, password = credentials.split()
+        # Parse credentials
+        try:
+            name, password = credentials.split()
+        except ValueError:
+            shared_print(f"Invalid credentials format from client {id}.")
+            client_socket.send(b'0')
+            end_connection(id)
+            return
+
         shared_print(f"Received name: {name}")
 
+        # Authenticate user
         authenticated = authenticate_user(name, password)
         if not authenticated:
+            # Attempt to sign up the user
             if not signup_user(name, password):
                 client_socket.send(b'0')
                 end_connection(id)
@@ -235,13 +290,25 @@ def handle_client(client_socket, id):
         else:
             client_socket.send(b'1')
 
+        # Announce user join
         broadcast_message(f"{name} has joined", id)
         shared_print(color(id) + f"{name} has joined" + def_col)
 
         while True:
-            message = client_socket.recv(MAX_LEN).decode().strip()
+            # Read message length (4 bytes)
+            raw_msglen = recvall(client_socket, 4)
+            if not raw_msglen:
+                break
+            msglen = struct.unpack('>I', raw_msglen)[0]
+            # Read the message data
+            encrypted_message_base64 = recvall(client_socket, msglen)
+            if not encrypted_message_base64:
+                break
+
+            # Decrypt the message
+            message = decrypt_message(encrypted_message_base64)
             if not message:
-                continue
+                continue  # Skip if decryption failed
 
             if message == "#exit":
                 broadcast_message(f"{name} has left", id)
@@ -252,7 +319,10 @@ def handle_client(client_socket, id):
             if message == 'GET_USERS':
                 user_list = ', '.join(client.name for client in clients if client.name != "Anonymous")
                 user_list = "People entered the chatroom: " + user_list
-                client_socket.send(user_list.encode())
+                try:
+                    send_length_prefixed_message(client_socket, user_list.encode())
+                except Exception as e:
+                    shared_print(f"Error sending user list to client {id}: {e}")
                 continue
 
             broadcast_message(f"{name}: {message}", id)
@@ -265,7 +335,7 @@ def handle_client(client_socket, id):
         shared_print(f"An error occurred while handling client {id}: {e}")
         end_connection(id)
 
-
+# Authentication Functions
 def authenticate_user(username, password):
     try:
         with open("user_credentials.txt", "r") as file:
@@ -276,7 +346,7 @@ def authenticate_user(username, password):
                 if user == username and verify_sha256(password, stored_hash):
                     return True
     except FileNotFoundError:
-        print("Error: User credentials file not found.")
+        shared_print("Error: User credentials file not found.")
     return False
 
 def verify_sha256(password, stored_hash):
@@ -286,21 +356,26 @@ def verify_sha256(password, stored_hash):
 
 def signup_user(username, password):
     try:
-        with open("user_credentials.txt", "r") as file:
-            for line in file:
-                if username == line.strip().split()[0]:
-                    print("Error: Username already exists.")
-                    return False
+        # Check if username already exists
+        if os.path.exists("user_credentials.txt"):
+            with open("user_credentials.txt", "r") as file:
+                for line in file:
+                    if not line.strip():
+                        continue
+                    existing_user = line.strip().split()[0]
+                    if username == existing_user:
+                        shared_print("Error: Username already exists.")
+                        return False
 
+        # Hash the password and store credentials
         hashed_password = hashlib.sha256(password.encode()).hexdigest()  # SHA-256 hash
         with open("user_credentials.txt", "a") as file:
             file.write(f"{username} {hashed_password}\n")
             return True
 
     except IOError as e:
-        print(f"Error: Unable to open file: {e}")
+        shared_print(f"Error: Unable to open file: {e}")
         return False
-
 
 def main():
     global session_id
@@ -328,7 +403,7 @@ def main():
             with clients_lock:
                 clients.append(terminal)
 
-            threading.Thread(target=handle_client, args=(client_socket, id)).start()
+            threading.Thread(target=handle_client, args=(client_socket, id), daemon=True).start()
         except Exception as e:
             shared_print(f"Error accepting connection: {e}")
             break
