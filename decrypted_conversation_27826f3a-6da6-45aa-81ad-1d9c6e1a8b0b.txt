@@ -1,0 +1,19 @@
+[2024-12-04 15:43:32] john has joined
+[2024-12-04 15:43:34] john: hello
+[2024-12-04 15:43:53] elia has joined
+[2024-12-04 15:44:03] elia: hello john
+[2024-12-04 15:44:08] john: hello elia
+[2024-12-04 15:44:12] john: how are ypu
+[2024-12-04 15:44:18] elia: fine, you?
+[2024-12-04 15:44:28] john: i am goog
+[2024-12-04 15:44:37] john: this is my chatrrom
+[2024-12-04 15:44:44] elia: yes this is good
+[2024-12-04 15:44:50] elia: evrything is working fince
+[2024-12-04 15:44:58] john: yes good
+[2024-12-04 15:45:02] john: okay
+[2024-12-04 15:45:06] john: lets leave now
+[2024-12-04 15:45:12] elia: okay lets leave
+[2024-12-04 15:45:21] elia: bye john
+[2024-12-04 15:45:24] john: bye elia
+[2024-12-04 15:45:37] elia has left
+[2024-12-04 15:45:40] john has left
