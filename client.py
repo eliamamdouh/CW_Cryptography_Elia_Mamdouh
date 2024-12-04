@@ -2,6 +2,7 @@ import socket
 import threading
 import signal
 import sys
+import re  
 import os
 import hashlib
 import base64
@@ -105,7 +106,21 @@ def recvall(sock, n):
 
 def signup_user(client_socket):
     username = input("Enter a username: ")
-    password = input("Enter a password: ")
+    
+    # Password validation loop
+    while True:
+        password = input("Enter a password: ")
+        if len(password) < 8:
+            print("Password must be at least 8 characters long.")
+        elif not re.search(r"[A-Za-z]", password):
+            print("Password must contain at least one letter.")
+        elif not re.search(r"\d", password):
+            print("Password must contain at least one number.")
+        elif not re.search(r"[!@#$%^&*(),.?\":{}|<>]", password):
+            print("Password must contain at least one special character.")
+        else:
+            break  # Exit loop if password meets all criteria
+    
     # Hash the password before sending
     hashed_password = hashlib.sha256(password.encode()).hexdigest()
     credentials = f"{username} {hashed_password}"
@@ -114,9 +129,11 @@ def signup_user(client_socket):
         # Encrypt the action indicator and credentials
         action_encrypted = encrypt_message_to_server('SIGNUP')
         credentials_encrypted = encrypt_message_to_server(credentials)
+        
         # Send the encrypted action indicator and credentials
         send_encrypted_message(action_encrypted)
         send_encrypted_message(credentials_encrypted)
+        
         # Receive and decrypt the response
         response = receive_encrypted_response()
         return response == '1'
